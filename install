@@ -23,10 +23,10 @@ echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
 echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
 xray x25519 >> /usr/local/etc/xray/.keys
 
-# ✅ ПРАВИЛЬНЫЙ парсинг: xray x25519 выводит "Private key <ключ>" БЕЗ двоеточия
+# ✅ ПРАВИЛЬНЫЙ парсинг: xray x25519 выводит PrivateKey и Password (не Public key!)
 export uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/.keys)
-export privatkey=$(awk '/Private key/ {print $3}' /usr/local/etc/xray/.keys)
-export publickey=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+export privatkey=$(awk -F': ' '/PrivateKey/ {print $2}' /usr/local/etc/xray/.keys)
+export publickey=$(awk -F': ' '/Password/ {print $2}' /usr/local/etc/xray/.keys)
 export shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 
 # Создаем файл конфигурации Xray с первым inbound для main
@@ -157,8 +157,8 @@ cat << 'SCRIPT' > /usr/local/bin/mainuser
 protocol=$(jq -r '.inbounds[0].protocol' /usr/local/etc/xray/config.json)
 port=$(jq -r '.inbounds[0].port' /usr/local/etc/xray/config.json)
 uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)
-# ✅ ПРАВИЛЬНЫЙ парсинг: "Public key <ключ>" БЕЗ двоеточия
-pbk=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+# ✅ ПРАВИЛЬНО: Password = публичный ключ для клиента (pbk)
+pbk=$(awk -F': ' '/Password/ {print $2}' /usr/local/etc/xray/.keys)
 sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
@@ -199,9 +199,9 @@ fi
 # Генерируем новый UUID
 uuid=$(xray uuid)
 
-# ✅ ПРАВИЛЬНЫЙ парсинг: получаем ОБЩИЕ ключи Reality
-privatkey=$(awk '/Private key/ {print $3}' /usr/local/etc/xray/.keys)
-pbk=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+# ✅ ПРАВИЛЬНО: PrivateKey для сервера, Password для клиента
+privatkey=$(awk -F': ' '/PrivateKey/ {print $2}' /usr/local/etc/xray/.keys)
+pbk=$(awk -F': ' '/Password/ {print $2}' /usr/local/etc/xray/.keys)
 shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 
 # Создаем новый inbound
@@ -341,8 +341,8 @@ selected_tag="${tags[$selected_index]}"
 protocol=$(jq -r ".inbounds[$selected_index].protocol" /usr/local/etc/xray/config.json)
 port=$(jq -r ".inbounds[$selected_index].port" /usr/local/etc/xray/config.json)
 uuid=$(jq -r ".inbounds[$selected_index].settings.clients[0].id" /usr/local/etc/xray/config.json)
-# ✅ ПРАВИЛЬНЫЙ парсинг: "Public key <ключ>" БЕЗ двоеточия
-pbk=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+# ✅ ПРАВИЛЬНО: Password = публичный ключ для клиента (pbk)
+pbk=$(awk -F': ' '/Password/ {print $2}' /usr/local/etc/xray/.keys)
 sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 sni=$(jq -r ".inbounds[$selected_index].streamSettings.realitySettings.serverNames[0]" /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
@@ -383,6 +383,11 @@ cat << 'EOF' > $HOME/help
 
 Ключи Reality:
     /usr/local/etc/xray/.keys
+    
+Формат ключей xray x25519:
+    PrivateKey - приватный ключ для сервера (в config.json)
+    Password - публичный ключ для клиента (pbk в ссылке)
+    Hash32 - не используется
 
 Команды:
     systemctl restart xray          # перезагрузка
