@@ -24,7 +24,7 @@ echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
 xray x25519 >> /usr/local/etc/xray/.keys
 
 export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
-export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
+export privatkey=$(cat /usr/local/etc/xray/.keys | awk '/Private key:/ {print $3}')
 export shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
 # Создаем файл конфигурации Xray с первым inbound для main
@@ -156,7 +156,7 @@ cat << 'SCRIPT' > /usr/local/bin/mainuser
 protocol=$(jq -r '.inbounds[0].protocol' /usr/local/etc/xray/config.json)
 port=$(jq -r '.inbounds[0].port' /usr/local/etc/xray/config.json)
 uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk '/Public key:/ {print $3}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
@@ -198,8 +198,8 @@ fi
 uuid=$(xray uuid)
 
 # Получаем ОБЩИЕ ключи Reality из .keys
-privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
+privatkey=$(cat /usr/local/etc/xray/.keys | awk '/Private key:/ {print $3}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk '/Public key:/ {print $3}')
 shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
 # Создаем новый inbound
@@ -339,7 +339,7 @@ selected_tag="${tags[$selected_index]}"
 protocol=$(jq -r ".inbounds[$selected_index].protocol" /usr/local/etc/xray/config.json)
 port=$(jq -r ".inbounds[$selected_index].port" /usr/local/etc/xray/config.json)
 uuid=$(jq -r ".inbounds[$selected_index].settings.clients[0].id" /usr/local/etc/xray/config.json)
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk '/Public key:/ {print $3}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r ".inbounds[$selected_index].streamSettings.realitySettings.serverNames[0]" /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
