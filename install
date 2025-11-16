@@ -371,6 +371,44 @@ echo ${link} | qrencode -t ansiutf8
 SCRIPT
 chmod +x /usr/local/bin/sharelink
 
+# Команда для мониторинга трафика по портам
+cat << 'SCRIPT' > /usr/local/bin/traffic
+#!/bin/bash
+
+echo "Мониторинг трафика по пользователям:"
+echo "======================================"
+echo ""
+
+users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
+
+for i in "${!users[@]}"; do
+    username="${users[$i]}"
+    port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
+    
+    # Получаем статистику по порту
+    if command -v iftop &> /dev/null; then
+        echo "Пользователь: $username (порт: $port)"
+        echo "Для детального просмотра используйте: iftop -i eth0 -f \"port $port\""
+    else
+        echo "Пользователь: $username (порт: $port)"
+        # Показываем активные соединения
+        connections=$(ss -tn | grep ":$port " | wc -l)
+        echo "Активных соединений: $connections"
+    fi
+    echo ""
+done
+
+echo "======================================"
+echo "Для установки расширенного мониторинга:"
+echo "apt install iftop nethogs vnstat"
+echo ""
+echo "Примеры команд:"
+echo "  iftop -i eth0 -f \"port 10001\"  - мониторинг конкретного порта"
+echo "  nethogs eth0                    - мониторинг по процессам"
+echo "  vnstat -l                       - общая статистика трафика"
+SCRIPT
+chmod +x /usr/local/bin/traffic
+
 systemctl restart xray
 
 echo ""
@@ -390,6 +428,7 @@ cat << 'EOF' > $HOME/help
     rmuser     - удалить пользователя
     sharelink  - получить ссылку для любого пользователя
     userlist   - показать список всех пользователей
+    traffic    - мониторинг трафика по пользователям
 
 Особенности:
     • Каждый пользователь получает свой отдельный inbound на уникальном порту
@@ -397,6 +436,7 @@ cat << 'EOF' > $HOME/help
     • ВСЕ пользователи используют ОБЩИЕ ключи Reality (privateKey, publicKey, shortId)
     • Каждый пользователь имеет свой уникальный UUID
     • Главный пользователь "main" нельзя удалить
+    • Трафик можно отслеживать по портам
 
 Файлы:
     Конфигурация:    /usr/local/etc/xray/config.json
@@ -407,6 +447,12 @@ cat << 'EOF' > $HOME/help
     systemctl restart xray  - перезапустить
     systemctl status xray   - проверить статус
     systemctl stop xray     - остановить
+
+Мониторинг трафика:
+    traffic                           - показать активность по пользователям
+    ss -tn | grep :10001              - соединения конкретного порта
+    iftop -i eth0 -f "port 10001"     - детальный мониторинг порта
+    nethogs eth0                      - мониторинг по процессам
 
 EOF
 
