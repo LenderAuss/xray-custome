@@ -23,14 +23,13 @@ echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
 echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
 xray x25519 >> /usr/local/etc/xray/.keys
 
-# ✅ ИСПРАВЛЕНО: Правильный парсинг ключей (2-е поле после ':')
-export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
-export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
-export publickey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
-export shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+# ✅ ПРАВИЛЬНЫЙ парсинг: xray x25519 выводит "Private key <ключ>" БЕЗ двоеточия
+export uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/.keys)
+export privatkey=$(awk '/Private key/ {print $3}' /usr/local/etc/xray/.keys)
+export publickey=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+export shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 
 # Создаем файл конфигурации Xray с первым inbound для main
-touch /usr/local/etc/xray/config.json
 cat << EOF > /usr/local/etc/xray/config.json
 {
     "log": {
@@ -158,9 +157,9 @@ cat << 'SCRIPT' > /usr/local/bin/mainuser
 protocol=$(jq -r '.inbounds[0].protocol' /usr/local/etc/xray/config.json)
 port=$(jq -r '.inbounds[0].port' /usr/local/etc/xray/config.json)
 uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)
-# ✅ ИСПРАВЛЕНО: Правильный парсинг публичного ключа
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
-sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+# ✅ ПРАВИЛЬНЫЙ парсинг: "Public key <ключ>" БЕЗ двоеточия
+pbk=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
 link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#main"
@@ -200,10 +199,10 @@ fi
 # Генерируем новый UUID
 uuid=$(xray uuid)
 
-# ✅ ИСПРАВЛЕНО: Получаем ОБЩИЕ ключи Reality из .keys
-privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
-shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+# ✅ ПРАВИЛЬНЫЙ парсинг: получаем ОБЩИЕ ключи Reality
+privatkey=$(awk '/Private key/ {print $3}' /usr/local/etc/xray/.keys)
+pbk=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 
 # Создаем новый inbound
 new_inbound=$(cat <<EOF
@@ -342,9 +341,9 @@ selected_tag="${tags[$selected_index]}"
 protocol=$(jq -r ".inbounds[$selected_index].protocol" /usr/local/etc/xray/config.json)
 port=$(jq -r ".inbounds[$selected_index].port" /usr/local/etc/xray/config.json)
 uuid=$(jq -r ".inbounds[$selected_index].settings.clients[0].id" /usr/local/etc/xray/config.json)
-# ✅ ИСПРАВЛЕНО: Правильный парсинг публичного ключа
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
-sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+# ✅ ПРАВИЛЬНЫЙ парсинг: "Public key <ключ>" БЕЗ двоеточия
+pbk=$(awk '/Public key/ {print $3}' /usr/local/etc/xray/.keys)
+sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/.keys)
 sni=$(jq -r ".inbounds[$selected_index].streamSettings.realitySettings.serverNames[0]" /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
 link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$selected_tag"
@@ -379,23 +378,24 @@ cat << 'EOF' > $HOME/help
     • Уникальный UUID для каждого
     • Легко отслеживать трафик по портам
 
-Файл конфигурации находится по адресу:
-
+Файл конфигурации:
     /usr/local/etc/xray/config.json
 
-Команда для перезагрузки ядра Xray:
+Ключи Reality:
+    /usr/local/etc/xray/.keys
 
-    systemctl restart xray
+Команды:
+    systemctl restart xray          # перезагрузка
+    systemctl status xray           # статус
+    journalctl -u xray -f           # логи в реальном времени
 
-Мониторинг трафика по портам:
+Мониторинг трафика:
+    ss -tn | grep :10001            # соединения конкретного порта
+    netstat -an | grep :10001       # альтернатива
+    iftop -i eth0 -f "port 10001"   # детальный мониторинг
 
-    ss -tn | grep :10001              # соединения конкретного порта
-    netstat -an | grep :10001         # альтернатива
-    iftop -i eth0 -f "port 10001"     # детальный мониторинг (требует установки)
-
-Проверка ключей Reality:
-
-    cat /usr/local/etc/xray/.keys     # просмотр всех ключей
+Проверка ключей:
+    cat /usr/local/etc/xray/.keys   # просмотр всех ключей
 
 EOF
 
