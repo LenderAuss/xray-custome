@@ -17,19 +17,20 @@ fi
 # Устанавливаем ядро Xray
 bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# Создаем директорию для хранения данных пользователей
-mkdir -p /usr/local/etc/xray/users
+# Генерируем ОБЩИЕ ключи один раз (как в оригинале)
+[ -f /usr/local/etc/xray/.keys ] && rm /usr/local/etc/xray/.keys
+touch /usr/local/etc/xray/.keys
+echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
+echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
+xray x25519 >> /usr/local/etc/xray/.keys
 
-# Генерируем ключи для главного пользователя
-touch /usr/local/etc/xray/users/main.keys
-echo "port: 443" >> /usr/local/etc/xray/users/main.keys
-echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/users/main.keys
-echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/users/main.keys
-xray x25519 >> /usr/local/etc/xray/users/main.keys
+export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
+export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PrivateKey/ {print $2}')
+export shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
-export main_uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/main.keys)
-export main_privatkey=$(awk -F': ' '/PrivateKey/ {print $2}' /usr/local/etc/xray/users/main.keys)
-export main_shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/main.keys)
+# Создаем файл для хранения портов пользователей
+touch /usr/local/etc/xray/.ports
+echo "main:443" >> /usr/local/etc/xray/.ports
 
 # Создаем начальную конфигурацию с одним главным inbound
 cat << EOF > /usr/local/etc/xray/config.json
@@ -58,7 +59,7 @@ cat << EOF > /usr/local/etc/xray/config.json
             "settings": {
                 "clients": [
                     {
-                        "id": "$main_uuid",
+                        "id": "$uuid",
                         "flow": "xtls-rprx-vision"
                     }
                 ],
@@ -75,12 +76,12 @@ cat << EOF > /usr/local/etc/xray/config.json
                         "ozon.ru",
                         "www.ozon.ru"
                     ],
-                    "privateKey": "$main_privatkey",
+                    "privateKey": "$privatkey",
                     "minClientVer": "",
                     "maxClientVer": "",
                     "maxTimeDiff": 0,
                     "shortIds": [
-                        "$main_shortsid"
+                        "$shortsid"
                     ]
                 }
             },
@@ -138,7 +139,7 @@ chmod +x /usr/local/bin/get_free_port
 # Команда для списка пользователей
 cat << 'SCRIPT' > /usr/local/bin/userlist
 #!/bin/bash
-users=($(ls /usr/local/etc/xray/users/*.keys 2>/dev/null | xargs -n1 basename | sed 's/.keys$//'))
+users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
 
 if [[ ${#users[@]} -eq 0 ]]; then
     echo "Список пользователей пуст"
@@ -148,7 +149,7 @@ fi
 echo "Список пользователей:"
 for i in "${!users[@]}"; do
     username="${users[$i]}"
-    port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys 2>/dev/null)
+    port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
     echo "$((i+1)). $username (порт: $port)"
 done
 SCRIPT
@@ -157,18 +158,18 @@ chmod +x /usr/local/bin/userlist
 # Команда для получения ссылки главного пользователя
 cat << 'SCRIPT' > /usr/local/bin/mainuser
 #!/bin/bash
-username="main"
-port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-pbk=$(awk -F': ' '/PublicKey/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-sni="ozon.ru"
+protocol="vless"
+port=$(jq -r '.inbounds[0].port' /usr/local/etc/xray/config.json)
+uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PublicKey/ {print $2}')
+sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
 
-link="vless://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#main"
 
 echo ""
-echo "Ссылка для подключения ($username):"
+echo "Ссылка для подключения (main):"
 echo "$link"
 echo ""
 echo "QR-код:"
@@ -187,7 +188,9 @@ if [[ -z "$username" || "$username" == *" "* ]]; then
     exit 1
 fi
 
-if [[ -f "/usr/local/etc/xray/users/$username.keys" ]]; then
+# Проверяем, существует ли уже такой пользователь
+existing_tag=$(jq -r --arg tag "$username" '.inbounds[] | select(.tag == $tag) | .tag' /usr/local/etc/xray/config.json)
+if [[ -n "$existing_tag" ]]; then
     echo "Пользователь $username уже существует"
     exit 1
 fi
@@ -199,19 +202,15 @@ if [[ "$port" == "0" ]]; then
     exit 1
 fi
 
-# Генерируем ключи для нового пользователя
-touch /usr/local/etc/xray/users/$username.keys
-echo "port: $port" >> /usr/local/etc/xray/users/$username.keys
-echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/users/$username.keys
-echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/users/$username.keys
-xray x25519 >> /usr/local/etc/xray/users/$username.keys
+# Генерируем UUID для нового пользователя
+new_uuid=$(xray uuid)
 
-uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-privatkey=$(awk -F': ' '/PrivateKey/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
-pbk=$(awk -F': ' '/PublicKey/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+# Получаем ОБЩИЕ ключи (как в оригинале)
+privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PrivateKey/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PublicKey/ {print $2}')
+shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
-# Добавляем новый inbound в конфиг
+# Добавляем новый inbound в конфиг (используем ОБЩИЕ ключи Reality)
 new_inbound=$(cat <<EOF
 {
     "tag": "$username",
@@ -221,7 +220,7 @@ new_inbound=$(cat <<EOF
     "settings": {
         "clients": [
             {
-                "id": "$uuid",
+                "id": "$new_uuid",
                 "flow": "xtls-rprx-vision"
             }
         ],
@@ -261,11 +260,14 @@ EOF
 # Добавляем inbound в конфиг
 jq --argjson new_inbound "$new_inbound" '.inbounds += [$new_inbound]' /usr/local/etc/xray/config.json > tmp.json && mv tmp.json /usr/local/etc/xray/config.json
 
+# Сохраняем порт пользователя
+echo "$username:$port" >> /usr/local/etc/xray/.ports
+
 systemctl restart xray
 
 sni="ozon.ru"
 ip=$(curl -4 -s icanhazip.com)
-link="vless://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+link="vless://$new_uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$shortsid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
 
 echo ""
 echo "Пользователь $username создан на порту $port"
@@ -282,7 +284,7 @@ chmod +x /usr/local/bin/newuser
 cat << 'SCRIPT' > /usr/local/bin/rmuser
 #!/bin/bash
 
-users=($(ls /usr/local/etc/xray/users/*.keys 2>/dev/null | xargs -n1 basename | sed 's/.keys$//'))
+users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
 
 if [[ ${#users[@]} -eq 0 ]]; then
     echo "Нет пользователей для удаления"
@@ -292,7 +294,7 @@ fi
 echo "Список пользователей:"
 for i in "${!users[@]}"; do
     username="${users[$i]}"
-    port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys 2>/dev/null)
+    port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
     echo "$((i+1)). $username (порт: $port)"
 done
 
@@ -313,8 +315,8 @@ fi
 # Удаляем inbound из конфига
 jq --arg tag "$selected_user" 'del(.inbounds[] | select(.tag == $tag))' /usr/local/etc/xray/config.json > tmp.json && mv tmp.json /usr/local/etc/xray/config.json
 
-# Удаляем файл с ключами
-rm -f /usr/local/etc/xray/users/$selected_user.keys
+# Удаляем порт из списка
+sed -i "/^$selected_user:/d" /usr/local/etc/xray/.ports
 
 systemctl restart xray
 
@@ -326,7 +328,7 @@ chmod +x /usr/local/bin/rmuser
 cat << 'SCRIPT' > /usr/local/bin/sharelink
 #!/bin/bash
 
-users=($(ls /usr/local/etc/xray/users/*.keys 2>/dev/null | xargs -n1 basename | sed 's/.keys$//'))
+users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
 
 if [[ ${#users[@]} -eq 0 ]]; then
     echo "Список пользователей пуст"
@@ -336,7 +338,7 @@ fi
 echo "Список пользователей:"
 for i in "${!users[@]}"; do
     username="${users[$i]}"
-    port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys 2>/dev/null)
+    port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
     echo "$((i+1)). $username (порт: $port)"
 done
 
@@ -347,16 +349,18 @@ if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#users[@]} )); t
     exit 1
 fi
 
-selected_user="${users[$((choice - 1))]}"
+selected_index=$((choice - 1))
+selected_user="${users[$selected_index]}"
 
-port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
-uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
-pbk=$(awk -F': ' '/PublicKey/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
-sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
-sni="ozon.ru"
+protocol="vless"
+port=$(jq -r ".inbounds[$selected_index].port" /usr/local/etc/xray/config.json)
+uuid=$(jq -r ".inbounds[$selected_index].settings.clients[0].id" /usr/local/etc/xray/config.json)
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PublicKey/ {print $2}')
+sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
+sni=$(jq -r ".inbounds[$selected_index].streamSettings.realitySettings.serverNames[0]" /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
 
-link="vless://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$selected_user"
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$selected_user"
 
 echo ""
 echo "Ссылка для подключения ($selected_user):"
@@ -390,12 +394,14 @@ cat << 'EOF' > $HOME/help
 Особенности:
     • Каждый пользователь получает свой отдельный inbound на уникальном порту
     • Порты назначаются автоматически из диапазона 10000-65000
-    • Ключи хранятся в /usr/local/etc/xray/users/[username].keys
+    • ВСЕ пользователи используют ОБЩИЕ ключи Reality (privateKey, publicKey, shortId)
+    • Каждый пользователь имеет свой уникальный UUID
     • Главный пользователь "main" нельзя удалить
 
 Файлы:
     Конфигурация:    /usr/local/etc/xray/config.json
-    Ключи:           /usr/local/etc/xray/users/*.keys
+    Общие ключи:     /usr/local/etc/xray/.keys
+    Список портов:   /usr/local/etc/xray/.ports
 
 Команды Xray:
     systemctl restart xray  - перезапустить
