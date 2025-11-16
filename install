@@ -16,15 +16,17 @@ fi
 # Устанавливаем ядро Xray
 bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# Генерируем ОБЩИЕ ключи (как в оригинале)
+# Генерируем ОБЩИЕ ключи
 [ -f /usr/local/etc/xray/.keys ] && rm /usr/local/etc/xray/.keys
 touch /usr/local/etc/xray/.keys
 echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
 echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
 xray x25519 >> /usr/local/etc/xray/.keys
 
+# ✅ ИСПРАВЛЕНО: Правильный парсинг ключей (2-е поле после ':')
 export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
-export privatkey=$(cat /usr/local/etc/xray/.keys | awk '/Private key:/ {print $3}')
+export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
+export publickey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 export shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
 # Создаем файл конфигурации Xray с первым inbound для main
@@ -156,7 +158,8 @@ cat << 'SCRIPT' > /usr/local/bin/mainuser
 protocol=$(jq -r '.inbounds[0].protocol' /usr/local/etc/xray/config.json)
 port=$(jq -r '.inbounds[0].port' /usr/local/etc/xray/config.json)
 uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)
-pbk=$(cat /usr/local/etc/xray/.keys | awk '/Public key:/ {print $3}')
+# ✅ ИСПРАВЛЕНО: Правильный парсинг публичного ключа
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
@@ -197,9 +200,9 @@ fi
 # Генерируем новый UUID
 uuid=$(xray uuid)
 
-# Получаем ОБЩИЕ ключи Reality из .keys
-privatkey=$(cat /usr/local/etc/xray/.keys | awk '/Private key:/ {print $3}')
-pbk=$(cat /usr/local/etc/xray/.keys | awk '/Public key:/ {print $3}')
+# ✅ ИСПРАВЛЕНО: Получаем ОБЩИЕ ключи Reality из .keys
+privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
 # Создаем новый inbound
@@ -339,7 +342,8 @@ selected_tag="${tags[$selected_index]}"
 protocol=$(jq -r ".inbounds[$selected_index].protocol" /usr/local/etc/xray/config.json)
 port=$(jq -r ".inbounds[$selected_index].port" /usr/local/etc/xray/config.json)
 uuid=$(jq -r ".inbounds[$selected_index].settings.clients[0].id" /usr/local/etc/xray/config.json)
-pbk=$(cat /usr/local/etc/xray/.keys | awk '/Public key:/ {print $3}')
+# ✅ ИСПРАВЛЕНО: Правильный парсинг публичного ключа
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r ".inbounds[$selected_index].streamSettings.realitySettings.serverNames[0]" /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
@@ -388,6 +392,10 @@ cat << 'EOF' > $HOME/help
     ss -tn | grep :10001              # соединения конкретного порта
     netstat -an | grep :10001         # альтернатива
     iftop -i eth0 -f "port 10001"     # детальный мониторинг (требует установки)
+
+Проверка ключей Reality:
+
+    cat /usr/local/etc/xray/.keys     # просмотр всех ключей
 
 EOF
 
