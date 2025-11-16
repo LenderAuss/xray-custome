@@ -1,0 +1,410 @@
+#!/bin/bash
+
+apt update
+apt install qrencode curl jq -y
+
+# Включаем bbr
+bbr=$(sysctl -a | grep net.ipv4.tcp_congestion_control)
+if [ "$bbr" = "net.ipv4.tcp_congestion_control = bbr" ]; then
+    echo "bbr уже включен"
+else
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    echo "bbr включен"
+fi
+
+# Устанавливаем ядро Xray
+bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# Создаем директорию для хранения данных пользователей
+mkdir -p /usr/local/etc/xray/users
+
+# Генерируем ключи для главного пользователя
+touch /usr/local/etc/xray/users/main.keys
+echo "port: 443" >> /usr/local/etc/xray/users/main.keys
+echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/users/main.keys
+echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/users/main.keys
+xray x25519 >> /usr/local/etc/xray/users/main.keys
+
+export main_uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/main.keys)
+export main_privatkey=$(awk -F': ' '/PrivateKey/ {print $2}' /usr/local/etc/xray/users/main.keys)
+export main_shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/main.keys)
+
+# Создаем начальную конфигурацию с одним главным inbound
+cat << EOF > /usr/local/etc/xray/config.json
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "routing": {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {
+                "type": "field",
+                "domain": [
+                    "geosite:category-ads-all"
+                ],
+                "outboundTag": "block"
+            }
+        ]
+    },
+    "inbounds": [
+        {
+            "tag": "main",
+            "listen": "0.0.0.0",
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$main_uuid",
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "ozon.ru:443",
+                    "xver": 0,
+                    "serverNames": [
+                        "ozon.ru",
+                        "www.ozon.ru"
+                    ],
+                    "privateKey": "$main_privatkey",
+                    "minClientVer": "",
+                    "maxClientVer": "",
+                    "maxTimeDiff": 0,
+                    "shortIds": [
+                        "$main_shortsid"
+                    ]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ]
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ],
+    "policy": {
+        "levels": {
+            "0": {
+                "handshake": 3,
+                "connIdle": 180
+            }
+        }
+    }
+}
+EOF
+
+# Функция для получения свободного порта
+cat << 'SCRIPT' > /usr/local/bin/get_free_port
+#!/bin/bash
+start_port=10000
+end_port=65000
+
+for ((port=start_port; port<=end_port; port++)); do
+    if ! ss -tuln | grep -q ":$port "; then
+        # Проверяем, не используется ли порт в конфиге
+        if ! jq -e ".inbounds[] | select(.port == $port)" /usr/local/etc/xray/config.json > /dev/null 2>&1; then
+            echo $port
+            exit 0
+        fi
+    fi
+done
+
+echo "0"
+exit 1
+SCRIPT
+chmod +x /usr/local/bin/get_free_port
+
+# Команда для списка пользователей
+cat << 'SCRIPT' > /usr/local/bin/userlist
+#!/bin/bash
+users=($(ls /usr/local/etc/xray/users/*.keys 2>/dev/null | xargs -n1 basename | sed 's/.keys$//'))
+
+if [[ ${#users[@]} -eq 0 ]]; then
+    echo "Список пользователей пуст"
+    exit 1
+fi
+
+echo "Список пользователей:"
+for i in "${!users[@]}"; do
+    username="${users[$i]}"
+    port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys 2>/dev/null)
+    echo "$((i+1)). $username (порт: $port)"
+done
+SCRIPT
+chmod +x /usr/local/bin/userlist
+
+# Команда для получения ссылки главного пользователя
+cat << 'SCRIPT' > /usr/local/bin/mainuser
+#!/bin/bash
+username="main"
+port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+pbk=$(awk -F': ' '/PublicKey/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+sni="ozon.ru"
+ip=$(timeout 3 curl -4 -s icanhazip.com)
+
+link="vless://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+
+echo ""
+echo "Ссылка для подключения ($username):"
+echo "$link"
+echo ""
+echo "QR-код:"
+echo ${link} | qrencode -t ansiutf8
+SCRIPT
+chmod +x /usr/local/bin/mainuser
+
+# Команда для создания нового пользователя
+cat << 'SCRIPT' > /usr/local/bin/newuser
+#!/bin/bash
+
+read -p "Введите имя пользователя: " username
+
+if [[ -z "$username" || "$username" == *" "* ]]; then
+    echo "Имя пользователя не может быть пустым или содержать пробелы"
+    exit 1
+fi
+
+if [[ -f "/usr/local/etc/xray/users/$username.keys" ]]; then
+    echo "Пользователь $username уже существует"
+    exit 1
+fi
+
+# Получаем свободный порт
+port=$(get_free_port)
+if [[ "$port" == "0" ]]; then
+    echo "Не удалось найти свободный порт"
+    exit 1
+fi
+
+# Генерируем ключи для нового пользователя
+touch /usr/local/etc/xray/users/$username.keys
+echo "port: $port" >> /usr/local/etc/xray/users/$username.keys
+echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/users/$username.keys
+echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/users/$username.keys
+xray x25519 >> /usr/local/etc/xray/users/$username.keys
+
+uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+privatkey=$(awk -F': ' '/PrivateKey/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+shortsid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+pbk=$(awk -F': ' '/PublicKey/ {print $2}' /usr/local/etc/xray/users/$username.keys)
+
+# Добавляем новый inbound в конфиг
+new_inbound=$(cat <<EOF
+{
+    "tag": "$username",
+    "listen": "0.0.0.0",
+    "port": $port,
+    "protocol": "vless",
+    "settings": {
+        "clients": [
+            {
+                "id": "$uuid",
+                "flow": "xtls-rprx-vision"
+            }
+        ],
+        "decryption": "none"
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+            "show": false,
+            "dest": "ozon.ru:443",
+            "xver": 0,
+            "serverNames": [
+                "ozon.ru",
+                "www.ozon.ru"
+            ],
+            "privateKey": "$privatkey",
+            "minClientVer": "",
+            "maxClientVer": "",
+            "maxTimeDiff": 0,
+            "shortIds": [
+                "$shortsid"
+            ]
+        }
+    },
+    "sniffing": {
+        "enabled": true,
+        "destOverride": [
+            "http",
+            "tls"
+        ]
+    }
+}
+EOF
+)
+
+# Добавляем inbound в конфиг
+jq --argjson new_inbound "$new_inbound" '.inbounds += [$new_inbound]' /usr/local/etc/xray/config.json > tmp.json && mv tmp.json /usr/local/etc/xray/config.json
+
+systemctl restart xray
+
+sni="ozon.ru"
+ip=$(curl -4 -s icanhazip.com)
+link="vless://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+
+echo ""
+echo "Пользователь $username создан на порту $port"
+echo ""
+echo "Ссылка для подключения:"
+echo "$link"
+echo ""
+echo "QR-код:"
+echo ${link} | qrencode -t ansiutf8
+SCRIPT
+chmod +x /usr/local/bin/newuser
+
+# Команда для удаления пользователя
+cat << 'SCRIPT' > /usr/local/bin/rmuser
+#!/bin/bash
+
+users=($(ls /usr/local/etc/xray/users/*.keys 2>/dev/null | xargs -n1 basename | sed 's/.keys$//'))
+
+if [[ ${#users[@]} -eq 0 ]]; then
+    echo "Нет пользователей для удаления"
+    exit 1
+fi
+
+echo "Список пользователей:"
+for i in "${!users[@]}"; do
+    username="${users[$i]}"
+    port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys 2>/dev/null)
+    echo "$((i+1)). $username (порт: $port)"
+done
+
+read -p "Введите номер пользователя для удаления: " choice
+
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#users[@]} )); then
+    echo "Ошибка: номер должен быть от 1 до ${#users[@]}"
+    exit 1
+fi
+
+selected_user="${users[$((choice - 1))]}"
+
+if [[ "$selected_user" == "main" ]]; then
+    echo "Нельзя удалить главного пользователя!"
+    exit 1
+fi
+
+# Удаляем inbound из конфига
+jq --arg tag "$selected_user" 'del(.inbounds[] | select(.tag == $tag))' /usr/local/etc/xray/config.json > tmp.json && mv tmp.json /usr/local/etc/xray/config.json
+
+# Удаляем файл с ключами
+rm -f /usr/local/etc/xray/users/$selected_user.keys
+
+systemctl restart xray
+
+echo "Пользователь $selected_user удалён"
+SCRIPT
+chmod +x /usr/local/bin/rmuser
+
+# Команда для получения ссылки пользователя
+cat << 'SCRIPT' > /usr/local/bin/sharelink
+#!/bin/bash
+
+users=($(ls /usr/local/etc/xray/users/*.keys 2>/dev/null | xargs -n1 basename | sed 's/.keys$//'))
+
+if [[ ${#users[@]} -eq 0 ]]; then
+    echo "Список пользователей пуст"
+    exit 1
+fi
+
+echo "Список пользователей:"
+for i in "${!users[@]}"; do
+    username="${users[$i]}"
+    port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$username.keys 2>/dev/null)
+    echo "$((i+1)). $username (порт: $port)"
+done
+
+read -p "Выберите пользователя: " choice
+
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#users[@]} )); then
+    echo "Ошибка: номер должен быть от 1 до ${#users[@]}"
+    exit 1
+fi
+
+selected_user="${users[$((choice - 1))]}"
+
+port=$(awk -F': ' '/port/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
+uuid=$(awk -F': ' '/uuid/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
+pbk=$(awk -F': ' '/PublicKey/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
+sid=$(awk -F': ' '/shortsid/ {print $2}' /usr/local/etc/xray/users/$selected_user.keys)
+sni="ozon.ru"
+ip=$(curl -4 -s icanhazip.com)
+
+link="vless://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$selected_user"
+
+echo ""
+echo "Ссылка для подключения ($selected_user):"
+echo "$link"
+echo ""
+echo "QR-код:"
+echo ${link} | qrencode -t ansiutf8
+SCRIPT
+chmod +x /usr/local/bin/sharelink
+
+systemctl restart xray
+
+echo ""
+echo "============================================="
+echo "Xray-core успешно установлен!"
+echo "============================================="
+echo ""
+mainuser
+
+# Создаем файл с подсказками
+cat << 'EOF' > $HOME/help
+
+Команды для управления пользователями Xray:
+
+    mainuser   - показать ссылку главного пользователя
+    newuser    - создать нового пользователя на новом порту
+    rmuser     - удалить пользователя
+    sharelink  - получить ссылку для любого пользователя
+    userlist   - показать список всех пользователей
+
+Особенности:
+    • Каждый пользователь получает свой отдельный inbound на уникальном порту
+    • Порты назначаются автоматически из диапазона 10000-65000
+    • Ключи хранятся в /usr/local/etc/xray/users/[username].keys
+    • Главный пользователь "main" нельзя удалить
+
+Файлы:
+    Конфигурация:    /usr/local/etc/xray/config.json
+    Ключи:           /usr/local/etc/xray/users/*.keys
+
+Команды Xray:
+    systemctl restart xray  - перезапустить
+    systemctl status xray   - проверить статус
+    systemctl stop xray     - остановить
+
+EOF
+
+echo ""
+echo "Справка сохранена в ~/help"
+echo "Используйте команду: cat ~/help"
+echo ""
