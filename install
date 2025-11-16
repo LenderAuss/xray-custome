@@ -1,5 +1,4 @@
 #!/bin/bash
-
 apt update
 apt install qrencode curl jq -y
 
@@ -17,7 +16,7 @@ fi
 # Устанавливаем ядро Xray
 bash -c "$(curl -4 -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# Генерируем ОБЩИЕ ключи один раз (как в оригинале)
+# Генерируем ОБЩИЕ ключи (как в оригинале)
 [ -f /usr/local/etc/xray/.keys ] && rm /usr/local/etc/xray/.keys
 touch /usr/local/etc/xray/.keys
 echo "shortsid: $(openssl rand -hex 8)" >> /usr/local/etc/xray/.keys
@@ -25,14 +24,11 @@ echo "uuid: $(xray uuid)" >> /usr/local/etc/xray/.keys
 xray x25519 >> /usr/local/etc/xray/.keys
 
 export uuid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/uuid/ {print $2}')
-export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PrivateKey/ {print $2}')
+export privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
 export shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
-# Создаем файл для хранения портов пользователей
-touch /usr/local/etc/xray/.ports
-echo "main:443" >> /usr/local/etc/xray/.ports
-
-# Создаем начальную конфигурацию с одним главным inbound
+# Создаем файл конфигурации Xray с первым inbound для main
+touch /usr/local/etc/xray/config.json
 cat << EOF > /usr/local/etc/xray/config.json
 {
     "log": {
@@ -123,7 +119,6 @@ end_port=65000
 
 for ((port=start_port; port<=end_port; port++)); do
     if ! ss -tuln | grep -q ":$port "; then
-        # Проверяем, не используется ли порт в конфиге
         if ! jq -e ".inbounds[] | select(.port == $port)" /usr/local/etc/xray/config.json > /dev/null 2>&1; then
             echo $port
             exit 0
@@ -136,40 +131,38 @@ exit 1
 SCRIPT
 chmod +x /usr/local/bin/get_free_port
 
-# Команда для списка пользователей
+# Исполняемый файл для списка клиентов
 cat << 'SCRIPT' > /usr/local/bin/userlist
 #!/bin/bash
-users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
+tags=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
 
-if [[ ${#users[@]} -eq 0 ]]; then
-    echo "Список пользователей пуст"
+if [[ ${#tags[@]} -eq 0 ]]; then
+    echo "Список клиентов пуст"
     exit 1
 fi
 
-echo "Список пользователей:"
-for i in "${!users[@]}"; do
-    username="${users[$i]}"
+echo "Список клиентов:"
+for i in "${!tags[@]}"; do
+    tag="${tags[$i]}"
     port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
-    echo "$((i+1)). $username (порт: $port)"
+    echo "$((i+1)). $tag (порт: $port)"
 done
 SCRIPT
 chmod +x /usr/local/bin/userlist
 
-# Команда для получения ссылки главного пользователя
+# Исполняемый файл для ссылки основного пользователя
 cat << 'SCRIPT' > /usr/local/bin/mainuser
 #!/bin/bash
-protocol="vless"
+protocol=$(jq -r '.inbounds[0].protocol' /usr/local/etc/xray/config.json)
 port=$(jq -r '.inbounds[0].port' /usr/local/etc/xray/config.json)
 uuid=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json)
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PublicKey/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0]' /usr/local/etc/xray/config.json)
 ip=$(timeout 3 curl -4 -s icanhazip.com)
-
 link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#main"
-
 echo ""
-echo "Ссылка для подключения (main):"
+echo "Ссылка для подключения:"
 echo "$link"
 echo ""
 echo "QR-код:"
@@ -177,21 +170,20 @@ echo ${link} | qrencode -t ansiutf8
 SCRIPT
 chmod +x /usr/local/bin/mainuser
 
-# Команда для создания нового пользователя
+# Исполняемый файл для создания новых клиентов
 cat << 'SCRIPT' > /usr/local/bin/newuser
 #!/bin/bash
-
 read -p "Введите имя пользователя: " username
 
 if [[ -z "$username" || "$username" == *" "* ]]; then
-    echo "Имя пользователя не может быть пустым или содержать пробелы"
+    echo "Имя пользователя не может быть пустым или содержать пробелы. Попробуйте снова."
     exit 1
 fi
 
-# Проверяем, существует ли уже такой пользователь
+# Проверяем существование пользователя
 existing_tag=$(jq -r --arg tag "$username" '.inbounds[] | select(.tag == $tag) | .tag' /usr/local/etc/xray/config.json)
 if [[ -n "$existing_tag" ]]; then
-    echo "Пользователь $username уже существует"
+    echo "Пользователь с таким именем уже существует. Попробуйте снова."
     exit 1
 fi
 
@@ -202,15 +194,15 @@ if [[ "$port" == "0" ]]; then
     exit 1
 fi
 
-# Генерируем UUID для нового пользователя
-new_uuid=$(xray uuid)
+# Генерируем новый UUID
+uuid=$(xray uuid)
 
-# Получаем ОБЩИЕ ключи (как в оригинале)
-privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PrivateKey/ {print $2}')
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PublicKey/ {print $2}')
+# Получаем ОБЩИЕ ключи Reality из .keys
+privatkey=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Private key/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 shortsid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 
-# Добавляем новый inbound в конфиг (используем ОБЩИЕ ключи Reality)
+# Создаем новый inbound
 new_inbound=$(cat <<EOF
 {
     "tag": "$username",
@@ -220,7 +212,7 @@ new_inbound=$(cat <<EOF
     "settings": {
         "clients": [
             {
-                "id": "$new_uuid",
+                "id": "$uuid",
                 "flow": "xtls-rprx-vision"
             }
         ],
@@ -257,20 +249,17 @@ new_inbound=$(cat <<EOF
 EOF
 )
 
-# Добавляем inbound в конфиг
+# Добавляем новый inbound в конфиг
 jq --argjson new_inbound "$new_inbound" '.inbounds += [$new_inbound]' /usr/local/etc/xray/config.json > tmp.json && mv tmp.json /usr/local/etc/xray/config.json
-
-# Сохраняем порт пользователя
-echo "$username:$port" >> /usr/local/etc/xray/.ports
 
 systemctl restart xray
 
+# Генерируем ссылку
+protocol="vless"
 sni="ozon.ru"
 ip=$(curl -4 -s icanhazip.com)
-link="vless://$new_uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$shortsid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$shortsid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$username"
 
-echo ""
-echo "Пользователь $username создан на порту $port"
 echo ""
 echo "Ссылка для подключения:"
 echo "$link"
@@ -280,90 +269,83 @@ echo ${link} | qrencode -t ansiutf8
 SCRIPT
 chmod +x /usr/local/bin/newuser
 
-# Команда для удаления пользователя
+# Исполняемый файл для удаления клиентов
 cat << 'SCRIPT' > /usr/local/bin/rmuser
 #!/bin/bash
+tags=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
 
-users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
-
-if [[ ${#users[@]} -eq 0 ]]; then
-    echo "Нет пользователей для удаления"
+if [[ ${#tags[@]} -eq 0 ]]; then
+    echo "Нет клиентов для удаления."
     exit 1
 fi
 
-echo "Список пользователей:"
-for i in "${!users[@]}"; do
-    username="${users[$i]}"
+echo "Список клиентов:"
+for i in "${!tags[@]}"; do
+    tag="${tags[$i]}"
     port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
-    echo "$((i+1)). $username (порт: $port)"
+    echo "$((i+1)). $tag (порт: $port)"
 done
 
-read -p "Введите номер пользователя для удаления: " choice
+read -p "Введите номер клиента для удаления: " choice
 
-if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#users[@]} )); then
-    echo "Ошибка: номер должен быть от 1 до ${#users[@]}"
+if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#tags[@]} )); then
+    echo "Ошибка: номер должен быть от 1 до ${#tags[@]}"
     exit 1
 fi
 
-selected_user="${users[$((choice - 1))]}"
+selected_tag="${tags[$((choice - 1))]}"
 
-if [[ "$selected_user" == "main" ]]; then
+if [[ "$selected_tag" == "main" ]]; then
     echo "Нельзя удалить главного пользователя!"
     exit 1
 fi
 
-# Удаляем inbound из конфига
-jq --arg tag "$selected_user" 'del(.inbounds[] | select(.tag == $tag))' /usr/local/etc/xray/config.json > tmp.json && mv tmp.json /usr/local/etc/xray/config.json
-
-# Удаляем порт из списка
-sed -i "/^$selected_user:/d" /usr/local/etc/xray/.ports
+# Удаляем inbound
+jq --arg tag "$selected_tag" 'del(.inbounds[] | select(.tag == $tag))' /usr/local/etc/xray/config.json > tmp && mv tmp /usr/local/etc/xray/config.json
 
 systemctl restart xray
 
-echo "Пользователь $selected_user удалён"
+echo "Клиент $selected_tag удалён."
 SCRIPT
 chmod +x /usr/local/bin/rmuser
 
-# Команда для получения ссылки пользователя
+# Исполняемый файл для вывода списка пользователей и создания ссылок
 cat << 'SCRIPT' > /usr/local/bin/sharelink
 #!/bin/bash
+tags=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
 
-users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
-
-if [[ ${#users[@]} -eq 0 ]]; then
-    echo "Список пользователей пуст"
+if [[ ${#tags[@]} -eq 0 ]]; then
+    echo "Список клиентов пуст"
     exit 1
 fi
 
-echo "Список пользователей:"
-for i in "${!users[@]}"; do
-    username="${users[$i]}"
+echo "Список клиентов:"
+for i in "${!tags[@]}"; do
+    tag="${tags[$i]}"
     port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
-    echo "$((i+1)). $username (порт: $port)"
+    echo "$((i+1)). $tag (порт: $port)"
 done
 
-read -p "Выберите пользователя: " choice
+read -p "Выберите клиента: " client
 
-if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#users[@]} )); then
-    echo "Ошибка: номер должен быть от 1 до ${#users[@]}"
+if ! [[ "$client" =~ ^[0-9]+$ ]] || (( client < 1 || client > ${#tags[@]} )); then
+    echo "Ошибка: номер должен быть от 1 до ${#tags[@]}"
     exit 1
 fi
 
-selected_index=$((choice - 1))
-selected_user="${users[$selected_index]}"
+selected_index=$((client - 1))
+selected_tag="${tags[$selected_index]}"
 
-protocol="vless"
+protocol=$(jq -r ".inbounds[$selected_index].protocol" /usr/local/etc/xray/config.json)
 port=$(jq -r ".inbounds[$selected_index].port" /usr/local/etc/xray/config.json)
 uuid=$(jq -r ".inbounds[$selected_index].settings.clients[0].id" /usr/local/etc/xray/config.json)
-pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/PublicKey/ {print $2}')
+pbk=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/Public key/ {print $2}')
 sid=$(cat /usr/local/etc/xray/.keys | awk -F': ' '/shortsid/ {print $2}')
 sni=$(jq -r ".inbounds[$selected_index].streamSettings.realitySettings.serverNames[0]" /usr/local/etc/xray/config.json)
 ip=$(curl -4 -s icanhazip.com)
-
-link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$selected_user"
-
+link="$protocol://$uuid@$ip:$port?security=reality&sni=$sni&fp=firefox&pbk=$pbk&sid=$sid&spx=/&type=tcp&flow=xtls-rprx-vision&encryption=none#$selected_tag"
 echo ""
-echo "Ссылка для подключения ($selected_user):"
+echo "Ссылка для подключения:"
 echo "$link"
 echo ""
 echo "QR-код:"
@@ -371,51 +353,9 @@ echo ${link} | qrencode -t ansiutf8
 SCRIPT
 chmod +x /usr/local/bin/sharelink
 
-# Команда для мониторинга трафика по портам
-cat << 'SCRIPT' > /usr/local/bin/traffic
-#!/bin/bash
-
-echo "Мониторинг трафика по пользователям:"
-echo "======================================"
-echo ""
-
-users=($(jq -r '.inbounds[].tag' /usr/local/etc/xray/config.json))
-
-for i in "${!users[@]}"; do
-    username="${users[$i]}"
-    port=$(jq -r ".inbounds[$i].port" /usr/local/etc/xray/config.json)
-    
-    # Получаем статистику по порту
-    if command -v iftop &> /dev/null; then
-        echo "Пользователь: $username (порт: $port)"
-        echo "Для детального просмотра используйте: iftop -i eth0 -f \"port $port\""
-    else
-        echo "Пользователь: $username (порт: $port)"
-        # Показываем активные соединения
-        connections=$(ss -tn | grep ":$port " | wc -l)
-        echo "Активных соединений: $connections"
-    fi
-    echo ""
-done
-
-echo "======================================"
-echo "Для установки расширенного мониторинга:"
-echo "apt install iftop nethogs vnstat"
-echo ""
-echo "Примеры команд:"
-echo "  iftop -i eth0 -f \"port 10001\"  - мониторинг конкретного порта"
-echo "  nethogs eth0                    - мониторинг по процессам"
-echo "  vnstat -l                       - общая статистика трафика"
-SCRIPT
-chmod +x /usr/local/bin/traffic
-
 systemctl restart xray
 
-echo ""
-echo "============================================="
-echo "Xray-core успешно установлен!"
-echo "============================================="
-echo ""
+echo "Xray-core успешно установлен"
 mainuser
 
 # Создаем файл с подсказками
@@ -423,40 +363,34 @@ cat << 'EOF' > $HOME/help
 
 Команды для управления пользователями Xray:
 
-    mainuser   - показать ссылку главного пользователя
-    newuser    - создать нового пользователя на новом порту
-    rmuser     - удалить пользователя
-    sharelink  - получить ссылку для любого пользователя
-    userlist   - показать список всех пользователей
-    traffic    - мониторинг трафика по пользователям
+    mainuser - выводит ссылку для подключения основного пользователя
+    newuser - создает нового пользователя на отдельном порту
+    rmuser - удаление пользователей
+    sharelink - выводит список пользователей и позволяет создать для них ссылки для подключения
+    userlist - выводит список клиентов с портами
 
 Особенности:
-    • Каждый пользователь получает свой отдельный inbound на уникальном порту
-    • Порты назначаются автоматически из диапазона 10000-65000
-    • ВСЕ пользователи используют ОБЩИЕ ключи Reality (privateKey, publicKey, shortId)
-    • Каждый пользователь имеет свой уникальный UUID
-    • Главный пользователь "main" нельзя удалить
-    • Трафик можно отслеживать по портам
+    • Каждый пользователь на отдельном порту (main на 443, остальные 10000-65000)
+    • Общие ключи Reality для всех (безопасно!)
+    • Уникальный UUID для каждого
+    • Легко отслеживать трафик по портам
 
-Файлы:
-    Конфигурация:    /usr/local/etc/xray/config.json
-    Общие ключи:     /usr/local/etc/xray/.keys
-    Список портов:   /usr/local/etc/xray/.ports
+Файл конфигурации находится по адресу:
 
-Команды Xray:
-    systemctl restart xray  - перезапустить
-    systemctl status xray   - проверить статус
-    systemctl stop xray     - остановить
+    /usr/local/etc/xray/config.json
 
-Мониторинг трафика:
-    traffic                           - показать активность по пользователям
-    ss -tn | grep :10001              - соединения конкретного порта
-    iftop -i eth0 -f "port 10001"     - детальный мониторинг порта
-    nethogs eth0                      - мониторинг по процессам
+Команда для перезагрузки ядра Xray:
+
+    systemctl restart xray
+
+Мониторинг трафика по портам:
+
+    ss -tn | grep :10001              # соединения конкретного порта
+    netstat -an | grep :10001         # альтернатива
+    iftop -i eth0 -f "port 10001"     # детальный мониторинг (требует установки)
 
 EOF
 
 echo ""
 echo "Справка сохранена в ~/help"
-echo "Используйте команду: cat ~/help"
 echo ""
